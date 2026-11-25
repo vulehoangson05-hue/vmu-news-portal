@@ -1,0 +1,204 @@
+% !TeX program = xelatex
+\documentclass[a4paper,11pt]{article}
+
+% ---------- Font & ngôn ngữ (Tiếng Việt qua XeLaTeX) ----------
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setmainlanguage{vietnamese}
+\setmainfont{Times New Roman}
+
+% ---------- Trang & bố cục ----------
+\usepackage[a4paper,margin=2.3cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{parskip}
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+
+% ---------- Bảng, màu, code ----------
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{listings}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{milestone}{RGB}{31,73,125}
+\definecolor{warnred}{RGB}{176,42,42}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{codeframe},
+  columns=fullflexible,
+  showstringspaces=false,
+  xleftmargin=8pt,
+  xrightmargin=8pt,
+  framextopmargin=4pt,
+  framexbottommargin=4pt,
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=milestone,
+  urlcolor=milestone,
+  citecolor=milestone,
+  pdftitle={Loi giai tham khao - Do an DevOps VIMARU News Portal},
+}
+
+\pagestyle{fancy}
+\setlength{\headheight}{14.5pt}
+\fancyhf{}
+\rhead{Đồ án DevOps — VIMARU News Portal}
+\lhead{Lời giải tham khảo (nội bộ)}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\textbf{Lời giải tham khảo — Mốc 2}\\[4pt]
+\large Dockerfile \& Docker Compose\\[2pt]
+\normalsize Đồ án DevOps: VIMARU News Portal}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{center}
+\fbox{\parbox{0.85\linewidth}{\centering
+\textcolor{warnred}{\textbf{Tài liệu nội bộ — không phát cho sinh viên.}}\\
+Đây là bản lời giải đầy đủ, đã build và chạy thử thành công, dùng để giảng viên đối chiếu khi chấm Mốc 2. Các file \texttt{Dockerfile}, \texttt{.dockerignore}, \texttt{nginx.conf} và \texttt{docker-compose.yml} tương ứng \textbf{đã bị loại khỏi Git} (xem \texttt{.gitignore}) trong mã nguồn phát cho sinh viên — sinh viên phải tự viết lại từ đầu.
+}}
+\end{center}
+
+\section*{1. \texttt{backend/Dockerfile}}
+
+\begin{lstlisting}[language=bash]
+FROM node:20-alpine
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install --production
+
+COPY . .
+
+EXPOSE 4000
+CMD ["node", "src/app.js"]
+\end{lstlisting}
+
+\section*{2. \texttt{auth-service/Dockerfile}}
+
+Giống hệt mẫu backend, chỉ khác cổng:
+
+\begin{lstlisting}[language=bash]
+FROM node:20-alpine
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install --production
+
+COPY . .
+
+EXPOSE 5000
+CMD ["node", "src/app.js"]
+\end{lstlisting}
+
+\section*{3. \texttt{frontend/Dockerfile} (multi-stage: build rồi serve bằng Nginx)}
+
+\begin{lstlisting}[language=bash]
+# Stage 1: build ung dung React (Vite)
+FROM node:20-alpine AS build
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+ARG VITE_API_BASE_URL=/api
+ARG VITE_AUTH_BASE_URL=/auth
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+ENV VITE_AUTH_BASE_URL=$VITE_AUTH_BASE_URL
+RUN npm run build
+
+# Stage 2: serve file tinh bang Nginx
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+\end{lstlisting}
+
+Kèm theo \texttt{frontend/nginx.conf}:
+
+\begin{lstlisting}[language=bash]
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+\end{lstlisting}
+
+\section*{4. \texttt{docker-compose.yml} (gốc repo, chạy đồng thời cả 3 service)}
+
+\begin{lstlisting}[language=bash]
+services:
+  auth:
+    build: ./auth-service
+    container_name: vimaru-auth
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - ADMIN_PASSWORD=admin123
+      - JWT_SECRET=${JWT_SECRET:-vimaru-jwt-secret-change-me}
+      - JWT_EXPIRES_IN=2h
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: vimaru-backend
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - JWT_SECRET=${JWT_SECRET:-vimaru-jwt-secret-change-me}
+    volumes:
+      - ./backend/data:/app/data
+    depends_on:
+      - auth
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:4000/api}
+        VITE_AUTH_BASE_URL: ${VITE_AUTH_BASE_URL:-http://localhost:5000/api}
+    container_name: vimaru-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+      - auth
+    restart: unless-stopped
+\end{lstlisting}
+
+\section*{5. Điểm mấu chốt khi chấm}
+
+\begin{itemize}[itemsep=3pt]
+  \item \texttt{JWT\_SECRET} của \texttt{backend} và \texttt{auth} \textbf{phải giống nhau} — đây là lỗi phổ biến nhất khiến đăng nhập quản trị "chạy được nhưng thao tác thêm/sửa/xóa tin tức luôn báo 401".
+  \item \texttt{frontend} cần build với \textbf{cả hai} biến \texttt{VITE\_API\_BASE\_URL} và \texttt{VITE\_AUTH\_BASE\_URL} — thiếu biến thứ hai thì trang đăng nhập quản trị sẽ gọi nhầm về địa chỉ mặc định.
+  \item \texttt{docker-compose.yml} của sinh viên không bắt buộc phải giống hệt bản trên (tên service, thứ tự khai báo... có thể khác) — chỉ cần build được cả 3 image, `depends\_on` hợp lý, và 3 service giao tiếp đúng như mô tả trong tài liệu \texttt{nhiem-vu-sinh-vien.tex}.
+\end{itemize}
+
+\end{document}
